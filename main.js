@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x222222);
+scene.background = new THREE.Color(0xdddddd);
 
 const camera = new THREE.PerspectiveCamera(
   75,
@@ -19,41 +19,62 @@ document.body.appendChild(renderer.domElement);
 const light = new THREE.DirectionalLight(0xffffff, 2);
 light.position.set(2, 4, 2);
 light.castShadow = true;
+light.shadow.bias = -0.001;
+light.shadow.mapSize.set(2048, 2048);
 scene.add(light);
 scene.add(new THREE.AmbientLight(0x404040));
 
+// Page parameters
 const PAGE_WIDTH = 1.28;
 const PAGE_HEIGHT = 1.71;
 const PAGE_DEPTH = 0.003;
 const PAGE_SEGMENTS = 30;
 const SEGMENT_WIDTH = PAGE_WIDTH / PAGE_SEGMENTS;
 
-function createPage(front, back) {
-  const geometry = new THREE.BoxGeometry(
-    PAGE_WIDTH,
-    PAGE_HEIGHT,
-    PAGE_DEPTH,
-    PAGE_SEGMENTS,
-    2
-  );
-  geometry.translate(PAGE_WIDTH / 2, 0, 0);
+// Bending parameters
+const easingFactor = 0.5;
+const insideCurveStrength = 0.18;
+const outsideCurveStrength = 0.05;
+const turningCurveStrength = 0.09;
 
-  const position = geometry.attributes.position;
-  const vertex = new THREE.Vector3();
-  const skinIndices = [];
-  const skinWeights = [];
+// Shared geometry with skinning
+const pageGeometry = new THREE.BoxGeometry(
+  PAGE_WIDTH, PAGE_HEIGHT, PAGE_DEPTH, PAGE_SEGMENTS, 2
+);
+pageGeometry.translate(PAGE_WIDTH / 2, 0, 0);
 
-  for (let i = 0; i < position.count; i++) {
-    vertex.fromBufferAttribute(position, i);
-    const x = vertex.x;
-    const skinIndex = Math.max(0, Math.floor(x / SEGMENT_WIDTH));
-    const skinWeight = (x % SEGMENT_WIDTH) / SEGMENT_WIDTH;
-    skinIndices.push(skinIndex, skinIndex + 1, 0, 0);
-    skinWeights.push(1 - skinWeight, skinWeight, 0, 0);
-  }
+const posAttr = pageGeometry.attributes.position;
+const skinIdx = [];
+const skinWgh = [];
+for (let i = 0; i < posAttr.count; i++) {
+  const v = new THREE.Vector3().fromBufferAttribute(posAttr, i);
+  const si = Math.floor(v.x / SEGMENT_WIDTH);
+  const sw = (v.x % SEGMENT_WIDTH) / SEGMENT_WIDTH;
+  skinIdx.push(si, si + 1, 0, 0);
+  skinWgh.push(1 - sw, sw, 0, 0);
+}
+pageGeometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIdx, 4));
+pageGeometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWgh, 4));
 
-  geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
-  geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+// Page creation helper
+function createPage(frontURL, backURL) {
+  const loader = new THREE.TextureLoader();
+  const frontTex = loader.load(frontURL);
+  const backTex = loader.load(backURL);
+  frontTex.colorSpace = backTex.colorSpace = THREE.SRGBColorSpace;
+  frontTex.minFilter = backTex.minFilter = THREE.LinearFilter;
+
+  const mats = [
+    new THREE.MeshStandardMaterial({ color: 'white' }),
+    new THREE.MeshStandardMaterial({ color: '#111' }),
+    new THREE.MeshStandardMaterial({ color: 'white' }),
+    new THREE.MeshStandardMaterial({ color: 'white' }),
+    new THREE.MeshStandardMaterial({ map: frontTex, side: THREE.DoubleSide }),
+    new THREE.MeshStandardMaterial({ map: backTex, side: THREE.DoubleSide }),
+  ];
+
+  const mesh = new THREE.SkinnedMesh(pageGeometry, mats);
+  mesh.castShadow = mesh.receiveShadow = true;
 
   const bones = [];
   for (let i = 0; i <= PAGE_SEGMENTS; i++) {
@@ -62,108 +83,99 @@ function createPage(front, back) {
     if (i > 0) bones[i - 1].add(bone);
     bones.push(bone);
   }
-
-  const skeleton = new THREE.Skeleton(bones);
-
-  const loader = new THREE.TextureLoader();
-  loader.anisotropy = renderer.capabilities.getMaxAnisotropy();
-
-  const frontMap = loader.load(front);
-  const backMap = loader.load(back);
-
-  frontMap.colorSpace = THREE.SRGBColorSpace;
-  backMap.colorSpace = THREE.SRGBColorSpace;
-
-  frontMap.minFilter = THREE.LinearFilter;
-  backMap.minFilter = THREE.LinearFilter;
-
-  const materials = [
-    new THREE.MeshStandardMaterial({ color: 'white' }),
-    new THREE.MeshStandardMaterial({ color: '#111' }),
-    new THREE.MeshStandardMaterial({ color: 'white' }),
-    new THREE.MeshStandardMaterial({ color: 'white' }),
-    new THREE.MeshStandardMaterial({ map: frontMap, side: THREE.DoubleSide }),
-    new THREE.MeshStandardMaterial({ map: backMap, side: THREE.DoubleSide }),
-  ];
-
-  const mesh = new THREE.SkinnedMesh(geometry, materials);
   mesh.add(bones[0]);
-  mesh.bind(skeleton);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-
+  mesh.bind(new THREE.Skeleton(bones));
   return { mesh, bones };
 }
 
-const pagesData = [
-  'Bedzin', 'Bobolice', 'Dankow', 'Korzkiew', 'Lipowiec',
-  'Lutowiec', 'Mirow', 'Ogrodzieniec', 'Ojcow', 'Olsztyn',
-  'Pieskowa_Skala', 'Pilca', 'Rabsztyn', 'Ryczow', 'Siewierz',
-  'Smolen', 'Tenczyn'
+const pages = [
+  'Bedzin','Bobolice','Dankow','Korzkiew','Lipowiec',
+  'Lutowiec','Mirow','Ogrodzieniec','Ojcow','Olsztyn',
+  'Pieskowa_Skala','Pilca','Rabsztyn','Ryczow','Siewierz',
+  'Smolen','Tenczyn'
 ];
 
-let currentIndex = 0;
-let leftPage, rightPage;
-let rightBones;
+let idx = 0;
+let leftMesh, flipMesh, backMesh;
+let flipBones;
 let flipping = false;
-let flipProgress = 0;
+let progress = 0;
 
-function loadPages(index) {
-  if (leftPage) scene.remove(leftPage);
-  if (rightPage) scene.remove(rightPage);
+function showSpread(i) {
+  [leftMesh, flipMesh, backMesh].forEach(m => m && scene.remove(m));
 
-  if (pagesData[index]) {
-    const { mesh } = createPage(
-      `/descriptions/${pagesData[index]}.png`
+  // Left: description left, castle right
+  if (pages[i]) {
+    const left = createPage(
+      `/descriptions/${pages[i]}.png`,
+      `/photos/${pages[i]}.jpg`
     );
-    mesh.rotation.y = 0;
-    mesh.position.x = -PAGE_WIDTH / 2;
-    leftPage = mesh;
-    scene.add(mesh);
+    left.mesh.position.x = -PAGE_WIDTH;
+    left.mesh.rotation.y = 0;
+    leftMesh = left.mesh;
+    scene.add(leftMesh);
   }
 
-  if (pagesData[index]) {
-    const { mesh, bones } = createPage(
-      `/photos/${pagesData[index]}.jpg`
+  // Flip: description of next on front, castle of same next on back
+  if (pages[i + 1]) {
+    const flip = createPage(
+      `/photos/${pages[i + 1]}.jpg`,
+      `/descriptions/${pages[i+1]}.png`
+      
     );
-    mesh.position.x = PAGE_WIDTH / 2;
-    rightPage = mesh;
-    rightBones = bones;
-    scene.add(mesh);
-  } else {
-    rightPage = null;
-    rightBones = null;
+    flip.mesh.position.x = 0;
+    flipMesh = flip.mesh;
+    flipBones = flip.bones;
+    scene.add(flipMesh);
+  }
+
+  // Back: castle of next next behind
+  if (pages[i+1]) {
+    const back = createPage(
+      `/photos/${pages[i ]}.jpg`,
+      `/photos/${pages[i]}.jpg`,
+      
+      
+    );
+    back.mesh.position.x = PAGE_WIDTH;
+    back.mesh.rotation.y = -Math.PI;
+    backMesh = back.mesh;
+    scene.add(backMesh);
   }
 }
 
-loadPages(currentIndex);
+showSpread(idx);
 
 document.addEventListener('click', () => {
-  if (flipping || currentIndex >= pagesData.length - 1) return;
+  if (flipping || !flipBones) return;
   flipping = true;
-  flipProgress = 0;
+  progress = 0;
 });
 
 function animate() {
   requestAnimationFrame(animate);
-
-  if (flipping && rightBones) {
-    flipProgress += 0.015;
-    const angle = -Math.PI * Math.sin((flipProgress * Math.PI) / 2);
-    rightBones.forEach((bone) => {
-      bone.rotation.y += (angle - bone.rotation.y) * 0.15;
+  if (flipping) {
+    progress += 0.02;
+    const t = Math.min(1, progress);
+    const target = -Math.PI / 2;
+    flipBones.forEach((b, j) => {
+      const inside = j < 8 ? Math.sin(j * 0.2 + 0.25) : 0;
+      const outside = j >= 8 ? Math.cos(j * 0.3 + 0.09) : 0;
+      const turn = Math.sin(j * Math.PI / flipBones.length) * t;
+      const angle =
+        insideCurveStrength * inside * target -
+        outsideCurveStrength * outside * target +
+        turningCurveStrength * turn * target;
+      b.rotation.y += (angle - b.rotation.y) * easingFactor;
     });
-
-    if (flipProgress >= 1) {
+    if (progress >= 1) {
       flipping = false;
-      currentIndex++;
-      loadPages(currentIndex);
+      idx++;
+      showSpread(idx);
     }
   }
-
   renderer.render(scene, camera);
 }
-
 animate();
 
 window.addEventListener('resize', () => {
